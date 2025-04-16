@@ -55,20 +55,20 @@ class BERTFineTunedSemEval2018(EmotionClassifierBase):
         return self.classifier(text)
 
 class Llama32LoRAEmotion(EmotionClassifierBase):
-    def __init__(self):
+    def __init__(self, hf_token : str):
         super().__init__()
         self.dataset_labels = [
             "sadness", "joy", "love", "anger", "fear", "surprise"
         ]
         self.valid_split_names = ["train", "validation", "test"]
-        self.init_model_and_tokenizer()
+        self.init_model_and_tokenizer(hf_token)
 
-    def init_model_and_tokenizer(self):
+    def init_model_and_tokenizer(self, hf_token):
         base = "meta-llama/LLaMA-3.2-1B-Instruct"
-        adapter = "your-username/LLaMA-3-2-LoRA-EmotionTune"
-        self.tokenizer = AutoTokenizer.from_pretrained(base)
-        base_model = AutoModelForCausalLM.from_pretrained(base)
-        self.model = PeftModel.from_pretrained(base_model, adapter)
+        adapter = "tahamajs/LLaMA-3-2-LoRA-EmotionTune-Full"
+        self.tokenizer = AutoTokenizer.from_pretrained(base, token=hf_token)
+        base_model = AutoModelForCausalLM.from_pretrained(base, token=hf_token)
+        self.model = PeftModel.from_pretrained(base_model, adapter, token=hf_token)
 
     def init_dataset(self, split: str):
         super().init_dataset("dair-ai/emotion", split)
@@ -97,5 +97,5 @@ class Llama32LoRAEmotion(EmotionClassifierBase):
 
     def run_inference(self, text: str):
         inputs = self.tokenizer(text, return_tensors="pt")
-        outputs = self.model.generate(**inputs, max_new_tokens=50)
+        outputs = self.model.generate(**inputs, max_new_tokens=500)
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
