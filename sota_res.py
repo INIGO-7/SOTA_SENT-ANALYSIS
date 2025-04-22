@@ -242,90 +242,125 @@ Text: {text}
             "confidence": 1.0 if emotion else 0.0  # We don't have real confidence scores
         }
 
-class Phi35MiniEmotionClassifier(EmotionClassifierBase):
-    def __init__(self):
+class Phi3Mini4kInstructGGUF(EmotionClassifierBase):
+    def __init__(self, model_path : str):
         super().__init__()
         self.dataset_labels = [
-            "sadness", "joy", "love", "anger", "fear", "surprise"
+            "admiration", "amusement", "anger", "annoyance", "approval", "caring", 
+            "confusion", "curiosity", "desire", "disappointment", "disapproval", 
+            "disgust", "embarrassment", "excitement", "fear", "gratitude", "grief", 
+            "joy", "love", "nervousness", "optimism", "pride", "realization", "relief", 
+            "remorse", "sadness", "surprise", "neutral"
         ]
-        self.valid_split_names = ["train", "validation", "test"]
+        self.model_path = model_path
+        self.valid_split_names = ["train"]
         self.init_model_and_tokenizer()
 
     def init_model_and_tokenizer(self):
-        model_name = "microsoft/Phi-3.5-mini-instruct"
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True)
-        self.pipe = pipeline("text-generation", model=model_name, trust_remote_code=True)
+        # Use original Phi-3 tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-4k-instruct")
         
+        self.model = Llama(
+            model_path=self.model_path,
+            n_ctx=4096,
+            n_gpu_layers=-1,  # Use all GPU layers if available
+            verbose=False
+        )
+
     def init_dataset(self, split: str):
-        super().init_dataset("dair-ai/emotion", split)
-        
+        super().init_dataset("google-research-datasets/go_emotions", split, config_name="raw")
+        self.dataset = self.dataset.map(self.format_go_emotions_data)
+
+    def format_go_emotions_data(self, example):
+        """Convert Go Emotions format to multi-hot encoding"""
+        example["labels"] = [int(example[label]) for label in self.dataset_labels]
+        return example
+    
     def format_prompt(self, text: str):
-        """Format text with proper instruction for the Phi model"""
-        return [
-            {"role": "user", "content": f"Classify the emotion in this text into exactly one of these categories: {', '.join(self.dataset_labels)}. Text: {text}"}
+        """Create properly formatted chat prompt using Phi-3 template"""
+        messages = [
+            {"role": "system", "content": f"Identify ALL applicable emotions from: {', '.join(self.dataset_labels)}. Respond with comma-separated emotion names only."},
+            {"role": "user", "content": text}
         ]
         
-    def parse_prediction(self, prediction: str):
-        """Extract the emotion label from model output"""
-        prediction = prediction.lower().strip()
-        for label in self.dataset_labels:
-            if label in prediction:
-                return label
-        return None
+        # Manually apply the template found in Phi-3 HuggingFace repo
+        prompt = ""
+        for message in messages:
+            if message['role'] == 'system':
+                prompt += f"<|system|>\n{message['content']}<|end|>\n"
+            elif message['role'] == 'user':
+                prompt += f"<|user|>\n{message['content']}<|end|>\n"
         
+        # Add generation prompt
+        prompt += "<|assistant|>\n"
+        return prompt
+
+    def parse_prediction(self, prediction: str):
+        clean_pred = prediction.split("<|end|>")[0].strip().lower()
+        results = []
+        for label in self.dataset_labels:
+            pattern = rf"\b{re.escape(label)}\b"
+            if re.search(pattern, clean_pred):
+                results.append(label)
+        return results 
+
     def eval_performance(self, verbose: bool = False):
         self.true_labels = []
         self.pred_labels = []
         
         for i, example in enumerate(self.dataset):
             text = example["text"]
-            true_label = example["label"]
-            true_label_name = self.dataset_labels[true_label]
+            true_label = example["labels"]
             
-            # Format the prompt for phi model
             prompt = self.format_prompt(text)
+            output = self.model(
+                prompt=prompt,
+                max_tokens=100,
+                temperature=0.1,
+                top_p=0.9,
+                stop=["<|end|>"]  # Stop generation at the end token
+            )
             
-            # Get prediction from model
-            output = self.pipe(prompt, max_new_tokens=50)
-            response = output[0]["generated_text"]
+            # Extract just the assistant's response
+            full_output = output['choices'][0]['text']
+            response = full_output.split("<|assistant|>")[-1].strip()
             
-            # Extract generated response after prompt
-            # We need to parse the model's response to get the actual label
-            pred_label_name = self.parse_prediction(response)
-            
-            if pred_label_name is None:
-                # Default to a common emotion if model output isn't clear
-                pred_label = -1
-            else:
-                pred_label = self.dataset_labels.index(pred_label_name)
+            pred_labels = self.parse_prediction(response)
+            pred_vector = [1 if label in pred_labels else 0 for label in self.dataset_labels]
             
             self.true_labels.append(true_label)
-            self.pred_labels.append(pred_label)
-            
-            if verbose:
-                print(f"Example {i+1}:")
-                print(f"Text: {text}")
-                print(f"True: {true_label_name} ({true_label})")
-                print(f"Predicted: {pred_label_name} ({pred_label})")
-                print(f"Model output: {response}")
-                print("-" * 50)
+            self.pred_labels.append(pred_vector)
+
+            if verbose and i % 50 == 0:
+                print(f"Sample {i+1}:")
+                print(f"Prompt: {prompt}")
+                print(f"True: {[self.dataset_labels[i] for i, val in enumerate(true_label) if val]}")
+                print(f"Pred: {pred_labels}")
+                print(f"Raw: {response}")
+                print("-" * 80)
 
     def run_inference(self, text: str):
-        """Run inference on a single text example"""
         prompt = self.format_prompt(text)
-        output = self.pipe(prompt, max_new_tokens=50)
-        response = output[0]["generated_text"]
+        output = self.model(
+            prompt=prompt,
+            max_tokens=100,
+            temperature=0.1,
+            top_p=0.9,
+            stop=["<|end|>"]
+        )
         
-        # Extract the emotion label from response
-        emotion = self.parse_prediction(response)
+        full_output = output['choices'][0]['text']
+        response = full_output.split("<|assistant|>")[-1].strip()
+        emotions = self.parse_prediction(response)
         
         return {
             "text": text,
-            "predicted_emotion": emotion,
+            "prompt_used": prompt,
+            "predicted_emotions": emotions,
             "raw_output": response
         }
 
+    
 class RoBERTaGoEmotionsClassifier(EmotionClassifierBase):
     def __init__(self):
         super().__init__()
