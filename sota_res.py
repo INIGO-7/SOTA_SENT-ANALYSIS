@@ -371,7 +371,8 @@ class RoBERTaGoEmotionsClassifier(EmotionClassifierBase):
             "joy", "love", "nervousness", "optimism", "pride", "realization", "relief", 
             "remorse", "sadness", "surprise", "neutral"
         ]
-        self.valid_split_names = ["train", "validation", "test"]
+        # For some reason, "train" set is the only available subset, but it includes all the data
+        self.valid_split_names = ["train"]
         self.init_model_and_tokenizer()
 
     def init_model_and_tokenizer(self):
@@ -407,7 +408,7 @@ class RoBERTaGoEmotionsClassifier(EmotionClassifierBase):
         
         # Set format for PyTorch
         tokenized_ds.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
-        self.dataloader = DataLoader(tokenized_ds, batch_size=16)
+        self.dataloader = DataLoader(tokenized_ds, batch_size=128)
 
     def eval_performance(self, verbose: bool = True):
         """Evaluate model performance on the dataset"""
@@ -464,59 +465,103 @@ class RoBERTaGoEmotionsClassifier(EmotionClassifierBase):
             "predictions": emotions_dict,
             "top_emotions": top_emotions
         }
-    
-    def eval_performance(self, threshold=0.5):
-        """Analyze model performance with additional metrics"""
-        if not hasattr(self, 'true_labels') or not hasattr(self, 'pred_labels'):
-            print("Run eval_performance first!")
-            return
+
+class DolphinGemma2EmotionClassifier(EmotionClassifierBase):
+    def __init__(self, model_path : str):
+        super().__init__()
+        self.dataset_labels = [
+            "admiration", "amusement", "anger", "annoyance", "approval", "caring", 
+            "confusion", "curiosity", "desire", "disappointment", "disapproval", 
+            "disgust", "embarrassment", "excitement", "fear", "gratitude", "grief", 
+            "joy", "love", "nervousness", "optimism", "pride", "realization", "relief", 
+            "remorse", "sadness", "surprise", "neutral"
+        ]
+        self.model_path = model_path
+        self.valid_split_names = ["train"]
+        self.init_model_and_tokenizer()
+
+    def init_model_and_tokenizer(self):
+        
+        self.model = Llama(
+            model_path=self.model_path,
+            n_ctx=4096,  # Match model's context window
+            n_gpu_layers=-1,  # Use all GPU layers if available
+            verbose=False
+        )
+
+    def init_dataset(self, split: str):
+        super().init_dataset("google-research-datasets/go_emotions", split, config_name="raw")
+        self.dataset = self.dataset.map(self.format_go_emotions_data)
+
+    def format_go_emotions_data(self, example):
+        """Convert Go Emotions format to multi-hot encoding"""
+        example["labels"] = [int(example[label]) for label in self.dataset_labels]
+        return example
+
+    def format_prompt(self, text: str):
+        """Create chat-formatted prompt using model's template"""
+        return f"""<|im_start|>system
+Classify the text into ALL applicable emotions from: {", ".join(self.dataset_labels)}. 
+Respond with comma-separated emotion names only.<|im_end|>
+<|im_start|>user
+{text}<|im_end|>
+<|im_start|>assistant
+"""
+
+    def parse_prediction(self, prediction: str):
+        """Extract multiple emotions from model response"""
+        clean_pred = prediction.strip().lower()
+        # Handle possible comma-separated list
+        return [label for label in self.dataset_labels if label in clean_pred]
+
+    def eval_performance(self, verbose: bool = False):
+        self.true_labels = []
+        self.pred_labels = []
+        
+        for i, example in enumerate(self.dataset):
+            text = example["text"]
+            true_label = example["labels"]
             
-        # Calculate per-class metrics
-        true_positives = np.zeros(len(self.dataset_labels))
-        false_positives = np.zeros(len(self.dataset_labels))
-        false_negatives = np.zeros(len(self.dataset_labels))
-        
-        for true, pred in zip(self.true_labels, self.pred_labels):
-            for i in range(len(self.dataset_labels)):
-                if true[i] == 1 and pred[i] == 1:
-                    true_positives[i] += 1
-                elif true[i] == 0 and pred[i] == 1:
-                    false_positives[i] += 1
-                elif true[i] == 1 and pred[i] == 0:
-                    false_negatives[i] += 1
-        
-        # Calculate precision, recall, f1
-        precision = np.zeros(len(self.dataset_labels))
-        recall = np.zeros(len(self.dataset_labels))
-        f1 = np.zeros(len(self.dataset_labels))
-        
-        for i in range(len(self.dataset_labels)):
-            if true_positives[i] + false_positives[i] > 0:
-                precision[i] = true_positives[i] / (true_positives[i] + false_positives[i])
-            if true_positives[i] + false_negatives[i] > 0:
-                recall[i] = true_positives[i] / (true_positives[i] + false_negatives[i])
-            if precision[i] + recall[i] > 0:
-                f1[i] = 2 * precision[i] * recall[i] / (precision[i] + recall[i])
-        
-        # Create analysis report
-        analysis = {}
-        for i, label in enumerate(self.dataset_labels):
-            analysis[label] = {
-                "precision": precision[i],
-                "recall": recall[i],
-                "f1": f1[i],
-                "support": true_positives[i] + false_negatives[i]
-            }
+            prompt = self.format_prompt(text)
+            output = self.model(
+                prompt=prompt,
+                max_tokens=100,
+                temperature=0.1,
+                top_p=0.9,
+                stop=["<|im_end|>"]
+            )
             
-        # Calculate macro averages
-        macro_precision = np.mean(precision)
-        macro_recall = np.mean(recall)
-        macro_f1 = np.mean(f1)
+            response = output['choices'][0]['text'].strip()
+            pred_labels = self.parse_prediction(response)
+            pred_vector = [1 if label in pred_labels else 0 for label in self.dataset_labels]
+            
+            self.true_labels.append(true_label)
+            self.pred_labels.append(pred_vector)
+
+            if verbose and i % 50 == 0:
+                print(f"Sample {i+1}:")
+                print(f"Text: {text}")
+                print(f"True: {[self.dataset_labels[i] for i, val in enumerate(true_label) if val]}")
+                print(f"Pred: {pred_labels}")
+                print(f"Raw: {response}")
+                print("-" * 80)
+
+    def run_inference(self, text: str):
+        """Run multi-label emotion classification"""
+        prompt = self.format_prompt(text)
+        output = self.model(
+            prompt=prompt,
+            max_tokens=100,
+            temperature=0.1,
+            top_p=0.9,
+            stop=["<|im_end|>"]
+        )
+        response = output['choices'][0]['text'].strip()
+        emotions = self.parse_prediction(response)
         
-        analysis["macro_avg"] = {
-            "precision": macro_precision,
-            "recall": macro_recall,
-            "f1": macro_f1
+        return {
+            "text": text,
+            "predicted_emotions": emotions,
+            "raw_output": response,
+            "prompt_used": prompt
         }
-        
-        return analysis
