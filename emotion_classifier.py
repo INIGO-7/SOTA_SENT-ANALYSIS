@@ -132,7 +132,7 @@ class PromptTemplate:
 
     def __init__(self, template_name: str, system_prompt: str, user_pre_prompt: str = ""):
         self.template = self.TEMPLATES.get(template_name)
-        self.end_token = re.search(r'<\|.*?end.*?\|>', self.template).group()
+        self.end_token = (match.group() if (match := re.search(r'<\|.*?end.*?\|>', self.template)) else "")
         self.system_prompt = system_prompt
         self.user_pre_prompt = user_pre_prompt
         
