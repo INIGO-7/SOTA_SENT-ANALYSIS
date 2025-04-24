@@ -118,6 +118,11 @@ class PromptTemplate:
             "<|user|>\n{user_prompt}<|end|>\n"
             "<|assistant|>\n"
         ),
+        "deepseek": (
+            "<｜begin▁of▁sentence｜>{system_prompt}\n"
+            "<｜User｜>{prompt}\n"
+            "<｜Assistant｜>\n"
+        ),
         "chatml": (
             "<|im_start|>system\n{system_prompt}<|im_end|>\n"
             "<|im_start|>user\n{user_prompt}<|im_end|>\n"
@@ -203,21 +208,18 @@ class LlamaCppStrategy(ModelStrategy):
         self,
         model_name: str,
         model_path: str,
-        n_ctx: int,
         prompt_template: Optional[PromptTemplate] = None,
         n_gpu_layers: int = -1
     ):
         self.model_name = model_name
         self.model_path = model_path
         self.prompt_template = prompt_template
-        self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
         self.load_model()
 
     def load_model(self):
         self.model = Llama(
             model_path=self.model_path,
-            n_ctx=self.n_ctx,
             n_gpu_layers=self.n_gpu_layers,
             verbose=False
         )
