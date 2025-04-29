@@ -120,7 +120,7 @@ class PromptTemplate:
         ),
         "deepseek": (
             "<｜begin▁of▁sentence｜>{system_prompt}\n"
-            "<｜User｜>{prompt}\n"
+            "<｜User｜>{user_prompt}<｜end▁of▁sentence｜>\n"
             "<｜Assistant｜>\n"
         ),
         "chatml": (
@@ -130,13 +130,21 @@ class PromptTemplate:
         )
     }
 
-    def __init__(self, template_name: str, system_prompt: str, user_pre_prompt: str = ""):
-        self.template = self.TEMPLATES.get(template_name)
-        self.end_token = (match.group() if (match := re.search(r'<\|.*?end.*?\|>', self.template)) else "")
+    def __init__(self, template_name: Optional[str], system_prompt: str, user_pre_prompt: str = "", custom_template : bool = False):
+        self.custom_template = custom_template
+
+        if custom_template:
+            self.template = self.TEMPLATES.get(template_name)
+            self.end_token = (match.group() if (match := re.search(r'<\|.*?end.*?\|>', self.template)) else "\n")
+
         self.system_prompt = system_prompt
         self.user_pre_prompt = user_pre_prompt
         
     def format(self, user_prompt: str) -> str:
+        if not self.custom_template:
+            print("Custom template not provided! thus .format() function cannot be used")
+            return ""
+
         return self.template.format(
             system_prompt = self.system_prompt,
             user_prompt = self.user_pre_prompt + user_prompt
@@ -208,6 +216,8 @@ class LlamaCppStrategy(ModelStrategy):
         self,
         model_name: str,
         model_path: str,
+        n_ctx: int,
+        verbose: bool = False,
         prompt_template: Optional[PromptTemplate] = None,
         n_gpu_layers: int = -1
     ):
@@ -215,20 +225,23 @@ class LlamaCppStrategy(ModelStrategy):
         self.model_path = model_path
         self.prompt_template = prompt_template
         self.n_gpu_layers = n_gpu_layers
+        self.verbose = verbose
+        self.n_ctx = n_ctx
         self.load_model()
 
     def load_model(self):
         self.model = Llama(
             model_path=self.model_path,
             n_gpu_layers=self.n_gpu_layers,
-            verbose=False
+            n_ctx=self.n_ctx,
+            verbose=self.verbose
         )
 
     def prepare_input(self, text: str) -> str:
         return self.prompt_template.format(text) if self.prompt_template else text
     
     def parse_prediction(self, prediction: str, labels: List):
-        clean_pred = prediction.split(self.prompt_template.end_token)[0].strip().lower()
+        clean_pred = prediction.strip().lower()
         results = []
         for label in labels:
             pattern = rf"\b{re.escape(label)}\b"
@@ -237,24 +250,34 @@ class LlamaCppStrategy(ModelStrategy):
         return results 
 
     def get_sentiment(self, text: str, labels: List, max_tokens: int = 100) -> Dict:
-        prompt = self.prepare_input(text)
+        # prompt = self.prepare_input(text)
+        sysprompt = "You're a helpful assistant that classifies text into detected emotions"
+        usrprompt = text
 
-        output = self.model(
-            prompt = prompt,
-            max_tokens = max_tokens,
-            temperature = 0.1,
-            top_p = 0.9,
-            stop = self.prompt_template.end_token
+        if self.prompt_template:
+            sysprompt = self.prompt_template.system_prompt.strip('\n')
+            usrprompt = self.prompt_template.user_pre_prompt.strip('\n') + f" {text}"
+
+        output = self.model.create_chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": sysprompt,
+                },
+                {"role": "user", "content": usrprompt}, 
+            ],
+            temperature=0.1,
         )
-        full_output = output['choices'][0]['text']
-        response = full_output.split("<|assistant|>")[-1].strip()
+
+        response = output['choices'][0]['message']['content']
         emotions = self.parse_prediction(response, labels)
         
         return {
             "text": text,
-            "prompt": prompt,
+            "prompt": usrprompt,
             "emotions": emotions,
-            "raw_output": response
+            "response": response,
+            "raw_output": output
         }
     
     def get_multiple_sentiment(self, ds: List, labels: List, max_tokens: int = 100):
