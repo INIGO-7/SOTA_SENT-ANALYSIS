@@ -70,13 +70,22 @@ class DatasetHandler:
         }
     }
 
-    def __init__(self, dataset_name: str, split: str = "test"):
+    def __init__(self, dataset_name: str, split: str = "test", sample: float = None, seed: int = 42):
         if dataset_name not in self.DATASET_CONFIGS:
             raise ValueError(f"Invalid dataset. Choose from: {list(self.DATASET_CONFIGS.keys())}")
             
         self.config = self.DATASET_CONFIGS[dataset_name]
         self._validate_split(split)
         self._load_dataset(split)
+
+        if sample is not None:
+            if not (0 < sample <= 1):
+                raise ValueError("`sample` must be a float in (0, 1].")
+            n_total = len(self.data)
+            n_keep  = int(n_total * sample)
+            # shuffle→select to get a random 10 %
+            self.data = self.data.shuffle(seed=seed).select(range(n_keep))
+
         self._prepare_labels()
 
     def _validate_split(self, split: str):
@@ -87,8 +96,13 @@ class DatasetHandler:
         num_items, num_labels = len(self.data), len(self.config['labels'])
         y_targets_all = np.zeros((num_items, num_labels), dtype=int)
         for i, labels_indices in enumerate(self.data[self.config['label_column']]):
-            for label_index in labels_indices:
-                y_targets_all[i, label_index] = 1
+            if isinstance(labels_indices, int):
+                # single label - type: int
+                y_targets_all[i, labels_indices] = 1
+            else:
+                # assume iterable of labels - type: list
+                for label_index in labels_indices:
+                    y_targets_all[i, label_index] = 1
 
         self.one_hot_targets = y_targets_all
 
@@ -99,7 +113,10 @@ class DatasetHandler:
         )[split]
 
     def _prepare_labels(self):
-        self.labels = self.data.features["labels"].feature.names
+        if self.config["name"] == "go_emotions":
+            self.labels = self.data.features["labels"].feature.names
+        else:
+            self.labels = self.data.features["label"].names
         self.label_type = self.config['type']
         self.label2id = {label: i for i, label in enumerate(self.labels)}
         self._one_hot_encode_targets()
@@ -355,7 +372,8 @@ class EmotionClassifier:
     def create_performance_report(self, print_report: bool = False, 
                                 write_file: bool = True, 
                                 write_dir: str = "reports",
-                                file_name: str = None):
+                                exp_name: str = None,
+                                overwrite_name: str = None):
         """Generate classification report with format handling"""
 
         report = classification_report(
@@ -372,7 +390,7 @@ class EmotionClassifier:
             
         if write_file:
             try:
-                name = file_name if file_name else f"report+{self.model.model_name}+{self.dataset.config['name']}.csv"
+                name = overwrite_name if overwrite_name else f"report+{self.model.model_name}+{self.dataset.config['name']}+{exp_name if exp_name else ''}.csv"
                 path = os.path.join( write_dir, re.sub(re.escape(os.sep), '-', name) )
                 df = pd.DataFrame(report).transpose()
                 df.to_csv(path)
